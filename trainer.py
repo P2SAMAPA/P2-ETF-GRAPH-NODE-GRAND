@@ -101,6 +101,7 @@ def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
 
     adj = get_latest_graph(graphs, train_ret.index[-1])
     if adj is None:
+        print("  No graph available for training. Skipping.")
         return {"ticker": None, "metrics": {}}
 
     edge_index, edge_weight = build_edge_index(adj, config.DEVICE)
@@ -125,7 +126,9 @@ def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
                         config.EPOCHS, config.LEARNING_RATE, config.PATIENCE, config.DEVICE)
 
     # Predict on test set
-    test_adj = get_latest_graph(graphs, test_ret.index[0]) or adj
+    test_adj = get_latest_graph(graphs, test_ret.index[0])
+    if test_adj is None:
+        test_adj = adj
     test_edge_index, test_edge_weight = build_edge_index(test_adj, config.DEVICE)
     model.edge_index = test_edge_index
     model.edge_weight = test_edge_weight
@@ -170,7 +173,8 @@ def train_adaptive(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
 
     adj = get_latest_graph(graphs, train_ret.index[-1])
     if adj is None:
-        return {"ticker": None, "metrics": {}}
+        print("  No graph available for adaptive training. Falling back to global.")
+        return train_global(universe, returns, graphs)
 
     edge_index, edge_weight = build_edge_index(adj, config.DEVICE)
 
@@ -191,7 +195,9 @@ def train_adaptive(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
     model = train_grand(model, node_feats, y_train, y_val,
                         config.EPOCHS, config.LEARNING_RATE, config.PATIENCE, config.DEVICE)
 
-    test_adj = get_latest_graph(graphs, test_ret.index[0]) or adj
+    test_adj = get_latest_graph(graphs, test_ret.index[0] if len(test_ret) > 0 else returns.index[-1])
+    if test_adj is None:
+        test_adj = adj
     test_edge_index, test_edge_weight = build_edge_index(test_adj, config.DEVICE)
     model.edge_index = test_edge_index
     model.edge_weight = test_edge_weight
