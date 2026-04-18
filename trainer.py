@@ -235,9 +235,7 @@ def run_training():
     for universe in ["fi", "equity", "combined"]:
         print(f"\n{'='*50}\nProcessing {universe.upper()}\n{'='*50}")
         returns = get_universe_returns(df, universe)
-        print(f"  Universe {universe}: {len(returns)} days of returns data.")
         if returns.empty:
-            print(f"  WARNING: No returns data for {universe}, skipping.")
             continue
         graphs = build_rolling_graphs(returns)
         print(f"  Built {len(graphs)} graphs.")
