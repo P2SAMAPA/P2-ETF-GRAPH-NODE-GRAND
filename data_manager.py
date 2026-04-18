@@ -100,7 +100,6 @@ def compute_returns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_universe_returns(df: pd.DataFrame, universe: str) -> pd.DataFrame:
-    """Return DataFrame of returns for given universe. Forward‑fill missing early data."""
     if universe == "fi":
         tickers = config.FI_COMMODITY_TICKERS
     elif universe == "equity":
@@ -111,7 +110,4 @@ def get_universe_returns(df: pd.DataFrame, universe: str) -> pd.DataFrame:
         raise ValueError("universe must be 'fi', 'equity', or 'combined'")
 
     ret_cols = [f"{t}_ret" for t in tickers if f"{t}_ret" in df.columns]
-    returns_df = df[ret_cols].copy()
-    # Forward‑fill missing returns at the beginning (e.g., VCIT before 2009)
-    returns_df = returns_df.fillna(method='ffill').dropna()
-    return returns_df
+    return df[ret_cols].dropna()
