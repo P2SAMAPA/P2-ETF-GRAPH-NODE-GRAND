@@ -25,7 +25,7 @@ MACRO_COLS = ["VIX", "DXY", "T10Y2Y", "TBILL_3M", "IG_SPREAD", "HY_SPREAD"]
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 TEST_RATIO = 0.1
-MIN_TRAIN_DAYS = 400               # lowered to allow daily mode (≈440 graphs)
+MIN_TRAIN_DAYS = 400
 MIN_TEST_DAYS = 63
 TRADING_DAYS_PER_YEAR = 252
 DAILY_LOOKBACK = 504
@@ -39,7 +39,9 @@ ADAPTIVE_MAX_LOOKBACK = 252
 
 # Graph construction
 LOOKBACK_WINDOW = 63
-REBALANCE_FREQ = 1                 # BUILD EVERY DAY
+REBALANCE_FREQ = 1
+CORRELATION_THRESHOLD = 0.3            # sparser graph (was 0.1)
+FEATURE_WINDOW = 20                    # longer return history (was 5)
 
 # GCN+GRU model
 HIDDEN_DIM = 64
