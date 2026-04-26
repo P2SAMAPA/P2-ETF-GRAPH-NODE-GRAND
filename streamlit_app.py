@@ -77,19 +77,9 @@ def display_metrics(metrics):
         st.markdown(f'<div class="metric-value">{format_pct(metrics.get("hit_rate"))}</div>', unsafe_allow_html=True)
 
 
-def display_predicted_returns_table(all_pred_returns: dict):
-    if not all_pred_returns:
-        return
-    sorted_items = sorted(all_pred_returns.items(), key=lambda x: x[1], reverse=True)
-    df = pd.DataFrame(sorted_items, columns=["ETF", "Predicted Return"])
-    df["Predicted Return"] = df["Predicted Return"].apply(format_pct)
-    st.markdown("#### All Predicted Returns (Current Window)")
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-
 def display_card(data, mode="global"):
     if not data or not data.get("ticker"):
-        st.info("⏳ Waiting for training output...")
+        st.info(f"No {mode} training data available yet.")
         return
 
     ticker = data.get("ticker")
@@ -108,6 +98,9 @@ def display_card(data, mode="global"):
         st.markdown(f'<div class="meta-text">Signal for {next_day.strftime("%Y-%m-%d")} · Generated {gen_time}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="source-badge">Source: {mode} Training</div>', unsafe_allow_html=True)
     with col2:
+        if mode in ("Daily", "Global"):
+            window = data.get("optimal_window", "—")
+            st.markdown(f'<div class="meta-text">Optimal Window: {window} days</div>', unsafe_allow_html=True)
         if mode == "Adaptive":
             window = data.get("adaptive_window", "—")
             cp_date = data.get("change_point_date", "—")
@@ -118,22 +111,33 @@ def display_card(data, mode="global"):
     st.markdown(f'<div class="meta-text">Test: {data.get("test_start", "")} → {data.get("test_end", "")} ({metrics.get("n_days", "—")} days)</div>', unsafe_allow_html=True)
     display_metrics(metrics)
 
-    if mode == "Adaptive":
-        all_preds = data.get("all_pred_returns")
-        if all_preds:
-            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-            display_predicted_returns_table(all_preds)
+    # Show all predicted returns for adaptive (or any mode that has the field)
+    all_preds = data.get("all_pred_returns")
+    if all_preds:
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        # Sort and display table
+        sorted_items = sorted(all_preds.items(), key=lambda x: x[1], reverse=True)
+        df = pd.DataFrame(sorted_items, columns=["ETF", "Predicted Return"])
+        df["Predicted Return"] = df["Predicted Return"].apply(format_pct)
+        st.markdown("#### All Predicted Returns (Current Window)")
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+# ----- Universe tabs with Daily, Global, Adaptive sub-tabs -----
 for tab, key in [(tab_fi, "fi"), (tab_eq, "equity"), (tab_comb, "combined")]:
     with tab:
         st.subheader(key.capitalize())
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("### Global Training")
-            display_card(results.get(key, {}).get("global", {}), "Global")
-        with col2:
-            st.markdown("### Adaptive Window")
-            display_card(results.get(key, {}).get("adaptive", {}), "Adaptive")
+        uni = results.get(key, {})
+        if not uni:
+            st.info(f"No results for {key} yet.")
+            continue
+
+        d, g, a = st.tabs(["📅 Daily (504d)", "🌍 Global", "🔄 Adaptive"])
+        with d:
+            display_card(uni.get("daily", {}), "Daily")
+        with g:
+            display_card(uni.get("global", {}), "Global")
+        with a:
+            display_card(uni.get("adaptive", {}), "Adaptive")
