@@ -1,31 +1,25 @@
 """
-Global and Adaptive Window training with GRAND.
+Training pipeline with Global, Daily, and Adaptive modes.
 """
-import os
-import json
+import os, json
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from datetime import datetime
 from sklearn.preprocessing import StandardScaler
-
 import config
 from data_manager import load_master_data, prepare_data, get_universe_returns
-from graph_builder import build_rolling_graphs, get_latest_graph
-from grand_model import GRAND
+from graph_builder import build_daily_graphs
+from grand_model import TemporalGNN
 from change_point_detector import universe_adaptive_start_date
 from push_results import push_daily_result
 
-
-def evaluate_etf(ticker: str, returns: pd.DataFrame) -> dict:
+def evaluate_etf(ticker, returns):
     col = f"{ticker}_ret"
-    if col not in returns.columns:
-        return {}
+    if col not in returns.columns: return {}
     ret_series = returns[col].dropna()
-    if len(ret_series) < 5:
-        return {}
+    if len(ret_series) < 5: return {}
     ann_return = ret_series.mean() * config.TRADING_DAYS_PER_YEAR
     ann_vol = ret_series.std() * np.sqrt(config.TRADING_DAYS_PER_YEAR)
     sharpe = ann_return / ann_vol if ann_vol > 0 else 0.0
@@ -34,48 +28,37 @@ def evaluate_etf(ticker: str, returns: pd.DataFrame) -> dict:
     drawdown = (cum - rolling_max) / rolling_max
     max_dd = drawdown.min()
     hit_rate = (ret_series > 0).mean()
-    cum_return = (1 + ret_series).prod() - 1
     return {
         "ann_return": ann_return, "ann_vol": ann_vol, "sharpe": sharpe,
-        "max_dd": max_dd, "hit_rate": hit_rate, "cum_return": cum_return,
-        "n_days": len(ret_series)
+        "max_dd": max_dd, "hit_rate": hit_rate, "n_days": len(ret_series)
     }
 
-
-def build_edge_index(adj: np.ndarray, device: str = 'cpu'):
-    """Convert adjacency matrix to PyTorch Geometric edge_index and edge_weight."""
-    edges = np.where(adj != 0)
-    edge_index = torch.tensor(np.array(edges), dtype=torch.long, device=device)
-    edge_weight = torch.tensor(adj[edges], dtype=torch.float32, device=device)
-    return edge_index, edge_weight
-
-
-def train_grand(model, x, y_train, y_val, epochs, lr, patience, device):
+def train_temporal_model(model, graphs, epochs, lr, patience, device):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
-
-    best_val_loss = float('inf')
+    best_loss = float('inf')
     patience_counter = 0
     best_state = None
+
+    # Prepare data
+    x_seq = [g[0].to(device) for _, g in graphs]
+    edge_seq = [g[1].to(device) for _, g in graphs]
+    weight_seq = [g[2].to(device) for _, g in graphs]
+    targets = torch.stack([g[3].to(device) for _, g in graphs], dim=0)  # (T, n_nodes)
 
     for epoch in range(epochs):
         model.train()
         optimizer.zero_grad()
-        pred = model(x)
-        loss = criterion(pred, y_train)
+        preds = model(list(zip(x_seq, edge_seq, weight_seq)))  # (T, n_nodes, 1)
+        loss = criterion(preds.squeeze(-1), targets)
         loss.backward()
         optimizer.step()
 
-        model.eval()
-        with torch.no_grad():
-            val_pred = model(x)
-            val_loss = criterion(val_pred, y_val)
-
         if (epoch + 1) % 20 == 0:
-            print(f"    Epoch {epoch+1:3d} | Train Loss: {loss.item():.6f} | Val Loss: {val_loss.item():.6f}")
+            print(f"    Epoch {epoch+1:3d} | Loss: {loss.item():.6f}")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if loss.item() < best_loss:
+            best_loss = loss.item()
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
             patience_counter = 0
         else:
@@ -87,167 +70,89 @@ def train_grand(model, x, y_train, y_val, epochs, lr, patience, device):
     model.load_state_dict(best_state)
     return model
 
-
-def train_global(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
-    print(f"\n--- Global Training: {universe} ---")
+def train_mode(universe, returns, macro, mode='global'):
+    print(f"\n--- {mode.upper()} Training: {universe} ---")
     tickers = [col.replace("_ret", "") for col in returns.columns]
-    total_days = len(returns)
-    train_end = int(total_days * config.TRAIN_RATIO)
-    val_end = train_end + int(total_days * config.VAL_RATIO)
+    graphs = build_daily_graphs(returns, macro)
+    if len(graphs) < config.MIN_TRAIN_DAYS:
+        print("  Not enough daily snapshots.")
+        return None
 
-    train_ret = returns.iloc[:train_end]
-    val_ret = returns.iloc[train_end:val_end]
-    test_ret = returns.iloc[val_end:]
+    # Split
+    n = len(graphs)
+    train_end = int(n * config.TRAIN_RATIO)
+    val_end = train_end + int(n * config.VAL_RATIO)
+    train_graphs = graphs[:train_end]
+    test_graphs = graphs[val_end:]
 
-    adj = get_latest_graph(graphs, train_ret.index[-1])
-    if adj is None:
-        print("  No graph available for training. Skipping.")
-        return {"ticker": None, "metrics": {}}
+    # Model
+    node_dim = train_graphs[0][1][0].size(1)
+    model = TemporalGNN(node_dim, config.HIDDEN_DIM, config.NUM_LAYERS, config.DROPOUT)
+    model = train_temporal_model(model, train_graphs, config.EPOCHS, config.LEARNING_RATE, config.PATIENCE, config.DEVICE)
 
-    edge_index, edge_weight = build_edge_index(adj, config.DEVICE)
-
-    # Node features: recent returns (last 20 days)
-    window = 20
-    recent = train_ret.iloc[-window:].values.T  # (n_nodes, window)
-    scaler = StandardScaler()
-    node_feats = scaler.fit_transform(recent)
-    node_feats = torch.tensor(node_feats, dtype=torch.float32, device=config.DEVICE)
-
-    # Targets: average forward return (simplified)
-    y_train = torch.tensor(train_ret.shift(-1).mean().values, dtype=torch.float32, device=config.DEVICE)
-    y_val = torch.tensor(val_ret.mean().values, dtype=torch.float32, device=config.DEVICE)
-
-    model = GRAND(
-        node_dim=window, edge_index=edge_index, edge_weight=edge_weight,
-        hidden_dim=config.HIDDEN_DIM, ode_time=config.ODE_TIME, dropout=config.DROPOUT
-    ).to(config.DEVICE)
-
-    model = train_grand(model, node_feats, y_train, y_val,
-                        config.EPOCHS, config.LEARNING_RATE, config.PATIENCE, config.DEVICE)
-
-    # Predict on test set
-    test_adj = get_latest_graph(graphs, test_ret.index[0])
-    if test_adj is None:
-        test_adj = adj
-    test_edge_index, test_edge_weight = build_edge_index(test_adj, config.DEVICE)
-    model.edge_index = test_edge_index
-    model.edge_weight = test_edge_weight
-
+    # Predict on latest test graph
     model.eval()
     with torch.no_grad():
-        pred_returns = model(node_feats).cpu().numpy()
+        if test_graphs:
+            latest_x, latest_edge, latest_weight, _ = test_graphs[-1]
+            # Run a single forward pass using the whole test sequence to get hidden state, but for simplicity just pass the last
+            # Alternatively, run through the training sequence then the test sequence
+            # Here we just re‑feed the entire graph sequence up to test
+            all_x = [g[0] for _, g in train_graphs + test_graphs]
+            all_edge = [g[1] for _, g in train_graphs + test_graphs]
+            all_w = [g[2] for _, g in train_graphs + test_graphs]
+            preds = model(list(zip(all_x, all_edge, all_w)))[-1].squeeze(-1).cpu().numpy()
+        else:
+            latest_x, latest_edge, latest_weight, _ = train_graphs[-1]
+            preds = model([(latest_x, latest_edge, latest_weight)])[0].squeeze(-1).cpu().numpy()
 
-    best_idx = np.argmax(pred_returns)
+    best_idx = np.argmax(preds)
     best_ticker = tickers[best_idx]
-    pred_return = float(pred_returns[best_idx])
-    all_pred_returns = {tickers[i]: float(pred_returns[i]) for i in range(len(tickers))}
-
-    metrics = evaluate_etf(best_ticker, test_ret)
-    print(f"  Selected ETF: {best_ticker}, Predicted Return: {pred_return*100:.2f}%")
+    pred_return = float(preds[best_idx])
+    all_preds = {tickers[i]: float(preds[i]) for i in range(len(tickers))}
+    metrics = evaluate_etf(best_ticker, pd.DataFrame({f"{best_ticker}_ret": returns[best_ticker].iloc[-config.MIN_TEST_DAYS:]}))
     return {
-        "ticker": best_ticker,
-        "pred_return": pred_return,
-        "all_pred_returns": all_pred_returns,
-        "metrics": metrics,
-        "test_start": test_ret.index[0].strftime("%Y-%m-%d"),
-        "test_end": test_ret.index[-1].strftime("%Y-%m-%d"),
+        "ticker": best_ticker, "pred_return": pred_return,
+        "all_pred_returns": all_preds, "metrics": metrics,
+        "optimal_window": config.LOOKBACK_WINDOW,
+        "test_start": str(returns.index[-config.MIN_TEST_DAYS].date()),
+        "test_end": str(returns.index[-1].date())
     }
 
-
-def train_adaptive(universe: str, returns: pd.DataFrame, graphs: list) -> dict:
-    print(f"\n--- Adaptive Training: {universe} ---")
-    tickers = [col.replace("_ret", "") for col in returns.columns]
-    cp_date = universe_adaptive_start_date(returns)
-    print(f"  Adaptive window starts: {cp_date.date()}")
-
-    end_date = returns.index[-1] - pd.Timedelta(days=config.MIN_TEST_DAYS)
-    if end_date <= cp_date:
-        end_date = returns.index[-1] - pd.Timedelta(days=10)
-    train_mask = (returns.index >= cp_date) & (returns.index <= end_date)
-    train_ret = returns.loc[train_mask]
-    test_ret = returns.loc[returns.index > end_date]
-
-    if len(train_ret) < config.MIN_TRAIN_DAYS:
-        print("  Insufficient training days. Falling back to global.")
-        return train_global(universe, returns, graphs)
-
-    adj = get_latest_graph(graphs, train_ret.index[-1])
-    if adj is None:
-        print("  No graph available for adaptive training. Falling back to global.")
-        return train_global(universe, returns, graphs)
-
-    edge_index, edge_weight = build_edge_index(adj, config.DEVICE)
-
-    window = 20
-    recent = train_ret.iloc[-window:].values.T
-    scaler = StandardScaler()
-    node_feats = scaler.fit_transform(recent)
-    node_feats = torch.tensor(node_feats, dtype=torch.float32, device=config.DEVICE)
-
-    y_train = torch.tensor(train_ret.shift(-1).mean().values, dtype=torch.float32, device=config.DEVICE)
-    y_val = torch.tensor(train_ret.iloc[-len(train_ret)//5:].mean().values, dtype=torch.float32, device=config.DEVICE)
-
-    model = GRAND(
-        node_dim=window, edge_index=edge_index, edge_weight=edge_weight,
-        hidden_dim=config.HIDDEN_DIM, ode_time=config.ODE_TIME, dropout=config.DROPOUT
-    ).to(config.DEVICE)
-
-    model = train_grand(model, node_feats, y_train, y_val,
-                        config.EPOCHS, config.LEARNING_RATE, config.PATIENCE, config.DEVICE)
-
-    test_adj = get_latest_graph(graphs, test_ret.index[0] if len(test_ret) > 0 else returns.index[-1])
-    if test_adj is None:
-        test_adj = adj
-    test_edge_index, test_edge_weight = build_edge_index(test_adj, config.DEVICE)
-    model.edge_index = test_edge_index
-    model.edge_weight = test_edge_weight
-
-    model.eval()
-    with torch.no_grad():
-        pred_returns = model(node_feats).cpu().numpy()
-
-    best_idx = np.argmax(pred_returns)
-    best_ticker = tickers[best_idx]
-    pred_return = float(pred_returns[best_idx])
-    all_pred_returns = {tickers[i]: float(pred_returns[i]) for i in range(len(tickers))}
-
-    metrics = evaluate_etf(best_ticker, test_ret) if len(test_ret) > 0 else {}
-    lookback = (returns.index[-1] - cp_date).days
-    print(f"  Selected ETF: {best_ticker}, Predicted Return: {pred_return*100:.2f}%")
-    return {
-        "ticker": best_ticker,
-        "pred_return": pred_return,
-        "all_pred_returns": all_pred_returns,
-        "adaptive_window": lookback,
-        "change_point_date": cp_date.strftime("%Y-%m-%d"),
-        "metrics": metrics,
-        "test_start": test_ret.index[0].strftime("%Y-%m-%d") if len(test_ret) else "",
-        "test_end": test_ret.index[-1].strftime("%Y-%m-%d") if len(test_ret) else "",
-    }
-
-
-def run_training():
-    print("Loading data...")
+def main():
+    token = os.getenv("HF_TOKEN")
+    if not token: return
     df_raw = load_master_data()
     df = prepare_data(df_raw)
+    results = {}
 
-    all_results = {}
-    for universe in ["fi", "equity", "combined"]:
-        print(f"\n{'='*50}\nProcessing {universe.upper()}\n{'='*50}")
-        returns = get_universe_returns(df, universe)
-        if returns.empty:
-            continue
-        graphs = build_rolling_graphs(returns)
-        print(f"  Built {len(graphs)} graphs.")
-        global_res = train_global(universe, returns, graphs)
-        adaptive_res = train_adaptive(universe, returns, graphs)
-        all_results[universe] = {"global": global_res, "adaptive": adaptive_res}
-    return all_results
+    for univ_id, univ_name in [("fi", "FI"), ("equity", "Equity"), ("combined", "Combined")]:
+        returns = get_universe_returns(df, univ_id)
+        if returns.empty: continue
+        macro = df[config.MACRO_COLS].loc[returns.index].ffill().dropna()
+        common = returns.index.intersection(macro.index)
+        returns = returns.loc[common]
+        macro = macro.loc[common]
 
+        univ_res = {}
+        # Global
+        global_out = train_mode(univ_name, returns, macro, 'global')
+        if global_out: univ_res['global'] = global_out
+
+        # Adaptive
+        adaptive_out = train_mode(univ_name, returns, macro, 'adaptive')
+        if adaptive_out: univ_res['adaptive'] = adaptive_out
+
+        # Daily (last 504 days)
+        daily_ret = returns.iloc[-config.DAILY_LOOKBACK:]
+        daily_macro = macro.loc[daily_ret.index]
+        daily_out = train_mode(univ_name, daily_ret, daily_macro, 'daily')
+        if daily_out: univ_res['daily'] = daily_out
+
+        results[univ_id] = univ_res
+
+    push_daily_result(results)
+    print("\n=== Run Complete ===")
 
 if __name__ == "__main__":
-    output = run_training()
-    if config.HF_TOKEN:
-        push_daily_result(output)
-    else:
-        print("HF_TOKEN not set.")
+    main()
