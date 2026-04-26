@@ -1,5 +1,5 @@
 """
-Global, Adaptive, and Daily training with GCN+GRU.
+Global, Adaptive, and Daily training with GCN+GRU (target scaling + residual).
 """
 import os
 import json
@@ -49,7 +49,6 @@ def train_temporal(model, graphs, epochs, lr, patience, device):
     patience_counter = 0
     best_state = None
 
-    # Prepare data
     x_seq = [g[1][0].to(device) for g in graphs]
     edge_seq = [g[1][1].to(device) for g in graphs]
     weight_seq = [g[1][2].to(device) for g in graphs]
@@ -65,11 +64,7 @@ def train_temporal(model, graphs, epochs, lr, patience, device):
         optimizer.step()
 
         if (epoch + 1) % 20 == 0:
-            model.eval()
-            with torch.no_grad():
-                val_pred = model(list(zip(x_seq, edge_seq, weight_seq)))
-                val_loss = criterion(val_pred.squeeze(-1), targets)
-            print(f"    Epoch {epoch+1:3d} | Loss: {val_loss.item():.6f}")
+            print(f"    Epoch {epoch+1:3d} | Loss: {loss.item():.6f}")
 
         if loss.item() < best_loss:
             best_loss = loss.item()
@@ -95,19 +90,28 @@ def train_mode(universe, returns, macro, mode='global'):
         print(f"  Not enough daily graphs ({len(graphs)} < {config.MIN_TRAIN_DAYS}).")
         return None
 
-    # Train/val/test split
     n = len(graphs)
     train_end = int(n * config.TRAIN_RATIO)
     val_end = train_end + int(n * config.VAL_RATIO)
     train_graphs = graphs[:train_end]
     test_graphs = graphs[val_end:]
 
+    # ---- Scale targets to help GRU training ----
+    target_scaler = StandardScaler()
+    all_train_targets = np.concatenate([g[1][3].numpy() for g in train_graphs])
+    target_scaler.fit(all_train_targets.reshape(-1, 1))
+
+    train_graphs = [
+        (date, (x, ei, ew, torch.tensor(target_scaler.transform(y.numpy().reshape(-1, 1)).flatten(), dtype=torch.float32)))
+        for (date, (x, ei, ew, y)) in train_graphs
+    ]
+
     node_dim = train_graphs[0][1][0].size(1)
     model = TemporalGNN(node_dim, config.HIDDEN_DIM, config.NUM_LAYERS, config.DROPOUT)
     model = train_temporal(model, train_graphs, config.EPOCHS, config.LEARNING_RATE,
                           config.PATIENCE, config.DEVICE)
 
-    # Predict on latest available graph
+    # Predict on latest graph
     model.eval()
     with torch.no_grad():
         if test_graphs:
@@ -118,7 +122,9 @@ def train_mode(universe, returns, macro, mode='global'):
         all_x = [g[1][0] for g in train_graphs + test_graphs]
         all_edge = [g[1][1] for g in train_graphs + test_graphs]
         all_w = [g[1][2] for g in train_graphs + test_graphs]
-        preds = model(list(zip(all_x, all_edge, all_w)))[-1].squeeze(-1).cpu().nan_to_num().numpy()
+        preds = model(list(zip(all_x, all_edge, all_w)))[-1].squeeze(-1).cpu().numpy()
+        # Inverse transform to original scale
+        preds = target_scaler.inverse_transform(preds.reshape(-1, 1)).flatten()
 
     best_idx = np.argmax(preds)
     best_ticker = tickers[best_idx]
@@ -159,12 +165,10 @@ def main():
 
         univ_res = {}
 
-        # Global
         global_out = train_mode(univ_name, returns, macro, 'global')
         if global_out:
             univ_res['global'] = global_out
 
-        # Adaptive
         cp_date = universe_adaptive_start_date(returns)
         end_date = returns.index[-1] - pd.Timedelta(days=config.MIN_TEST_DAYS)
         if end_date <= cp_date:
@@ -181,7 +185,6 @@ def main():
         else:
             univ_res['adaptive'] = global_out
 
-        # Daily (last 504 days)
         daily_ret = returns.iloc[-config.DAILY_LOOKBACK:]
         daily_macro = macro.loc[daily_ret.index]
         daily_out = train_mode(univ_name, daily_ret, daily_macro, 'daily')
