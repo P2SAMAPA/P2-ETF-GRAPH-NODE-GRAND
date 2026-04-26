@@ -3,47 +3,49 @@ Configuration for P2-ETF-GRAPH-NODE-GRAND.
 """
 import os
 
-# Hugging Face configuration
 HF_INPUT_DATASET = "P2SAMAPA/fi-etf-macro-signal-master-data"
 HF_INPUT_FILE = "master_data.parquet"
 HF_OUTPUT_DATASET = "P2SAMAPA/p2-etf-graph-node-grand-results"
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
-# Universes
+# Universes (updated: SPY, IWF, XSD, XBI added; XLB, XLRE present)
 FI_COMMODITY_TICKERS = ["TLT", "VCIT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
-EQUITY_TICKERS = ["QQQ", "IWM", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "GDX", "XME"]
+EQUITY_TICKERS = [
+    "SPY", "QQQ", "XLK", "XLF", "XLE", "XLV",
+    "XLI", "XLY", "XLP", "XLU", "GDX", "XME",
+    "IWF", "XSD", "XBI", "IWM", "XLB", "XLRE"
+]
 COMBINED_TICKERS = FI_COMMODITY_TICKERS + EQUITY_TICKERS
-
 BENCHMARK_FI = "AGG"
 BENCHMARK_EQ = "SPY"
 
 MACRO_COLS = ["VIX", "DXY", "T10Y2Y", "TBILL_3M", "IG_SPREAD", "HY_SPREAD"]
 
-# Training parameters
+# Training
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 TEST_RATIO = 0.1
-MIN_TRAIN_DAYS = 252 * 2
+MIN_TRAIN_DAYS = 504
 MIN_TEST_DAYS = 63
 TRADING_DAYS_PER_YEAR = 252
+DAILY_LOOKBACK = 504
 
-# Change Point Detection (for adaptive window)
+# Change Point
 CP_PENALTY = 3.0
 CP_MODEL = "l2"
 CP_MIN_DAYS_BETWEEN = 20
 CP_CONSENSUS_FRACTION = 0.5
 ADAPTIVE_MAX_LOOKBACK = 252
 
-# Graph construction
-LOOKBACK_WINDOW = 60               # days for rolling correlation
-REBALANCE_FREQ = 20                # recompute graph every N trading days
+# Graph
+LOOKBACK_WINDOW = 63                # correlation window
+REBALANCE_FREQ = 1                  # rebuild EVERY day (dynamic)
 
-# GRAND model hyperparameters
-HIDDEN_DIM = 32                    # hidden dimension for node features
-ODE_TIME = 1.0                     # terminal integration time T
-NUM_LAYERS = 2                     # number of diffusion layers
+# Model
+HIDDEN_DIM = 64
+NUM_LAYERS = 3
 DROPOUT = 0.1
 LEARNING_RATE = 0.001
 EPOCHS = 100
-PATIENCE = 20
+PATIENCE = 15
 DEVICE = "cpu"
