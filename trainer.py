@@ -49,22 +49,27 @@ def train_temporal(model, graphs, epochs, lr, patience, device):
     patience_counter = 0
     best_state = None
 
-    # Prepare data – each graph is (date, (x, edge_index, edge_weight, y))
+    # Prepare data
     x_seq = [g[1][0].to(device) for g in graphs]
     edge_seq = [g[1][1].to(device) for g in graphs]
     weight_seq = [g[1][2].to(device) for g in graphs]
-    targets = torch.stack([g[1][3].to(device) for g in graphs], dim=0)  # (T, n_nodes)
+    targets = torch.stack([g[1][3].to(device) for g in graphs], dim=0).nan_to_num()
 
     for epoch in range(epochs):
         model.train()
         optimizer.zero_grad()
-        preds = model(list(zip(x_seq, edge_seq, weight_seq)))  # (T, n_nodes, 1)
+        preds = model(list(zip(x_seq, edge_seq, weight_seq)))
         loss = criterion(preds.squeeze(-1), targets)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         if (epoch + 1) % 20 == 0:
-            print(f"    Epoch {epoch+1:3d} | Loss: {loss.item():.6f}")
+            model.eval()
+            with torch.no_grad():
+                val_pred = model(list(zip(x_seq, edge_seq, weight_seq)))
+                val_loss = criterion(val_pred.squeeze(-1), targets)
+            print(f"    Epoch {epoch+1:3d} | Loss: {val_loss.item():.6f}")
 
         if loss.item() < best_loss:
             best_loss = loss.item()
@@ -87,7 +92,7 @@ def train_mode(universe, returns, macro, mode='global'):
     graphs = build_daily_graphs(returns, macro)
 
     if len(graphs) < config.MIN_TRAIN_DAYS:
-        print("  Not enough daily graphs.")
+        print(f"  Not enough daily graphs ({len(graphs)} < {config.MIN_TRAIN_DAYS}).")
         return None
 
     # Train/val/test split
@@ -105,18 +110,15 @@ def train_mode(universe, returns, macro, mode='global'):
     # Predict on latest available graph
     model.eval()
     with torch.no_grad():
-        # Use all graphs up to the latest for proper hidden state
         if test_graphs:
-            # Take the last test graph as prediction point
             _, (latest_x, latest_edge, latest_weight, _) = test_graphs[-1]
         else:
             _, (latest_x, latest_edge, latest_weight, _) = train_graphs[-1]
 
-        # Run through the full sequence to get correct hidden state, then take the last output
         all_x = [g[1][0] for g in train_graphs + test_graphs]
         all_edge = [g[1][1] for g in train_graphs + test_graphs]
         all_w = [g[1][2] for g in train_graphs + test_graphs]
-        preds = model(list(zip(all_x, all_edge, all_w)))[-1].squeeze(-1).cpu().numpy()
+        preds = model(list(zip(all_x, all_edge, all_w)))[-1].squeeze(-1).cpu().nan_to_num().numpy()
 
     best_idx = np.argmax(preds)
     best_ticker = tickers[best_idx]
