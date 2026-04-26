@@ -19,7 +19,7 @@ EQUITY_TICKERS = [
 COMBINED_TICKERS = FI_COMMODITY_TICKERS + EQUITY_TICKERS
 BENCHMARK_FI = "AGG"
 BENCHMARK_EQ = "SPY"
-MACRO_COLS = ["VIX", "DXY", "T10Y2Y", "TBILL_3M", "IG_SPREAD", "HY_SPREAD"]
+MACRO_COLS = ["VIX", "DXY", "T10Y2Y", "TBILL_3M"]
 
 # Training parameters
 TRAIN_RATIO = 0.8
@@ -40,10 +40,10 @@ ADAPTIVE_MAX_LOOKBACK = 252
 # Graph construction
 LOOKBACK_WINDOW = 63
 REBALANCE_FREQ = 1
-CORRELATION_THRESHOLD = 0.3            # sparser graph (was 0.1)
-FEATURE_WINDOW = 20                    # longer return history (was 5)
+KNN_K = 5                     # number of nearest neighbours per node (based on correlation)
+FEATURE_WINDOW = 20           # days of returns per node feature
 
-# GCN+GRU model
+# GCN model
 HIDDEN_DIM = 64
 NUM_LAYERS = 3
 DROPOUT = 0.1
