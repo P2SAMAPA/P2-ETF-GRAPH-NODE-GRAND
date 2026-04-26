@@ -40,8 +40,8 @@ ADAPTIVE_MAX_LOOKBACK = 252
 # Graph construction
 LOOKBACK_WINDOW = 63
 REBALANCE_FREQ = 1
-KNN_K = 5                     # number of nearest neighbours per node (based on correlation)
-FEATURE_WINDOW = 20           # days of returns per node feature
+KNN_K = 5
+FEATURE_WINDOW = 20
 
 # GCN model
 HIDDEN_DIM = 64
@@ -49,5 +49,5 @@ NUM_LAYERS = 3
 DROPOUT = 0.1
 LEARNING_RATE = 0.001
 EPOCHS = 100
-PATIENCE = 15
+PATIENCE = 30                   # increased from 15
 DEVICE = "cpu"
